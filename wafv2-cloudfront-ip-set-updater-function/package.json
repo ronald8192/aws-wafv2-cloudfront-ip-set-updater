@@ -1,0 +1,12 @@
+{
+  "name": "wafv2-cloudfront-ip-set-updater-function",
+  "version": "1.0.0",
+  "main": "app.js",
+  "license": "MIT",
+  "author": "ronald8192",
+  "dependencies": {
+    "aws-xray-sdk-core": "^3.0.1",
+    "axios": "^0.19.2",
+    "crypto-js": "^4.0.0"
+  }
+}

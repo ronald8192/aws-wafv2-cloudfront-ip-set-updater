@@ -1,0 +1,252 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Subscribe to AmazonIpSpaceChanged SNS, trigger Lambda to update WAFv2 IP Set.
+  For limiting ALB access from CloudFront IP ranges.
+  
+Parameters:
+  CreateWebACL:
+    Type: String
+    Default: Create
+    AllowedValues:
+    - Create
+    - Skip
+  Project:
+    Type: String
+    Default: WAFv2CloudFrontIPWhitelisting
+  Environment:
+    Type: String
+    Default: Dev
+  BillingTag:
+    Type: String
+    Default: WAFv2CloudFrontIPWhitelisting
+
+Globals:
+  Function:
+    Timeout: 10
+    Tags:
+      project: !Ref Project
+      environment: !Ref Environment
+      billingTag: !Ref BillingTag
+
+Conditions:
+  ConditionCreateWebACL: !Equals [ !Ref CreateWebACL, Create ]
+
+Resources:
+  WAFv2CloudFrontIPSetUpdaterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: wafv2-cloudfront-ip-set-updater-function/
+      FunctionName: !Sub "UpdateWAFv2CloudFrontIPSets-${Environment}"
+      Handler: app.lambdaHandler
+      Runtime: nodejs12.x
+      Environment:
+        Variables:
+          EnforceIntegrity: true
+          ipset_ipv4_id: !GetAtt CloudFrontIPv4Set.Id
+          ipset_ipv4_name: !Select [ 0, !Split ['|', !Ref CloudFrontIPv4Set ] ]
+          ipset_ipv6_id: !GetAtt CloudFrontIPv6Set.Id
+          ipset_ipv6_name: !Select [ 0, !Split ['|', !Ref CloudFrontIPv6Set ] ]
+      Tracing: Active
+      Policies:
+      - AWSXrayWriteOnlyAccess
+      - Statement:
+        - Sid: UpdateWAFv2IPSets
+          Effect: Allow
+          Action:
+          - wafv2:GetIPSet
+          - wafv2:UpdateIPSet
+          Resource: 
+          - !GetAtt CloudFrontIPv4Set.Arn
+          - !GetAtt CloudFrontIPv6Set.Arn
+      # Uncomment this Events block to trigger Lambda updater function directly (for non-opt-in regions)
+      # For opt-in regions, comment this Events block and deploy the `lambda-caller` function
+      Events:
+        AmazonIpSpaceChanged:
+          Type: SNS
+          Properties:
+            Region: us-east-1
+            Topic: arn:aws:sns:us-east-1:806199016981:AmazonIpSpaceChanged
+
+  # Trigger the Lambda function after deploy to update the CloudFront IPs in IPSets
+  LambdaTrigger:
+    Type: Custom::CloudFrontIPUpdater
+    Properties:
+      ServiceToken: !GetAtt WAFv2CloudFrontIPSetUpdaterFunction.Arn
+
+  CloudFrontIPv4Set:
+    Type: AWS::WAFv2::IPSet
+    Properties:
+      Name: !Sub "CloudFront_IPv4_${Environment}"
+      Addresses: 
+      - 0.0.0.0/32
+      Description: Auto update by Lambda
+      IPAddressVersion: IPV4
+      Scope: REGIONAL
+      Tags: 
+      - Key: project
+        Value: !Ref Project
+      - Key: environment
+        Value: !Ref Environment
+  ManualWhitelistIPv4Set:
+    Type: AWS::WAFv2::IPSet
+    Properties:
+      Name: !Sub "Manual_Whitelist_IPv4_${Environment}"
+      Addresses: 
+      - 0.0.0.0/32
+      Description: !Sub "${Environment} Manual Whitelist IPv4"
+      IPAddressVersion: IPV4
+      Scope: REGIONAL
+      Tags: 
+      - Key: project
+        Value: !Ref Project
+      - Key: environment
+        Value: !Ref Environment
+
+  CloudFrontIPv6Set:
+    Type: AWS::WAFv2::IPSet
+    Properties:
+      Name: !Sub "CloudFront_IPv6_${Environment}"
+      Addresses: 
+        - 0000:0000:0000:0000:0000:0000:0000:0000/128
+      Description: Auto update by Lambda
+      IPAddressVersion: IPV6
+      Scope: REGIONAL
+      Tags: 
+        - Key: project
+          Value: !Ref Project
+        - Key: environment
+          Value: !Ref Environment
+  ManualWhitelistIPv6Set:
+    Type: AWS::WAFv2::IPSet
+    Properties:
+      Name: !Sub "Manual_Whitelist_IPv6_${Environment}"
+      Addresses: 
+      - 0000:0000:0000:0000:0000:0000:0000:0000/128
+      Description: !Sub "${Environment} Manual Whitelist IPv6"
+      IPAddressVersion: IPV6
+      Scope: REGIONAL
+      Tags: 
+      - Key: project
+        Value: !Ref Project
+      - Key: environment
+        Value: !Ref Environment
+
+  CloudFrontIPWhitelistRuleGroup:
+    Type: AWS::WAFv2::RuleGroup
+    Properties: 
+      Capacity: 2
+      Description: !Sub "${Environment} Whitelist CloudFront IP"
+      Name: !Sub "WhitelistCloudFrontIP${Environment}"
+      Rules: 
+        - Action: 
+            Allow: {}
+          Name: !Sub "WhitelistCloudFrontIP${Environment}"
+          Priority: 0
+          Statement: 
+            OrStatement:
+              Statements:
+                - IPSetReferenceStatement: 
+                    Arn: !GetAtt CloudFrontIPv4Set.Arn
+                - IPSetReferenceStatement: 
+                    Arn: !GetAtt CloudFrontIPv6Set.Arn
+          VisibilityConfig: 
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "WhitelistCloudFrontIPRules${Environment}"
+            SampledRequestsEnabled: true
+      Scope: 'REGIONAL'
+      Tags: 
+        - Key: project
+          Value: !Ref Project
+        - Key: environment
+          Value: !Ref Environment
+        - Key: billingTag
+          Value: !Ref BillingTag
+      VisibilityConfig: 
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "WhitelistCloudFrontIP${Environment}"
+        SampledRequestsEnabled: true
+
+  ManualIPWhitelistRuleGroup:
+    Type: AWS::WAFv2::RuleGroup
+    Properties: 
+      Capacity: 2
+      Description: !Sub "${Environment} Whitelist Manual IP"
+      Name: !Sub "WhitelistManualIP${Environment}"
+      Rules: 
+        - Action: 
+            Allow: {}
+          Name: !Sub "WhitelistManualIP${Environment}"
+          Priority: 0
+          Statement: 
+            OrStatement:
+              Statements:
+                - IPSetReferenceStatement: 
+                    Arn: !GetAtt ManualWhitelistIPv4Set.Arn
+                - IPSetReferenceStatement: 
+                    Arn: !GetAtt ManualWhitelistIPv6Set.Arn
+          VisibilityConfig: 
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "WhitelistManualIPRules-${Environment}"
+            SampledRequestsEnabled: true
+      Scope: 'REGIONAL'
+      Tags: 
+        - Key: project
+          Value: !Ref Project
+        - Key: environment
+          Value: !Ref Environment
+        - Key: billingTag
+          Value: !Ref BillingTag
+      VisibilityConfig: 
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "WhitelistManualIP-${Environment}"
+        SampledRequestsEnabled: true
+
+  CloudFrontIPWhitelistACL:
+    Type: AWS::WAFv2::WebACL
+    Condition: ConditionCreateWebACL
+    Properties: 
+      DefaultAction: 
+        Block: {}
+      Description: !Sub "${Environment} Whitelist CloudFront IP WebACL"
+      Name: !Sub "WhitelistCloudFrontIPWebACL${Environment}"
+      Rules: 
+        - Name: !Sub "WhitelistCloudFrontIP${Environment}"
+          OverrideAction: 
+            None: {}
+          Priority: 0
+          Statement: 
+            RuleGroupReferenceStatement:
+              Arn: !GetAtt CloudFrontIPWhitelistRuleGroup.Arn
+          VisibilityConfig: 
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "WhitelistCloudFrontIPWebACLRules${Environment}"
+            SampledRequestsEnabled: true
+        - Name: !Sub "WhitelistManualIP${Environment}"
+          OverrideAction: 
+            None: {}
+          Priority: 1
+          Statement: 
+            RuleGroupReferenceStatement:
+              Arn: !GetAtt ManualIPWhitelistRuleGroup.Arn
+          VisibilityConfig: 
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "WhitelistManualIPWebACLRules${Environment}"
+            SampledRequestsEnabled: true
+      Scope: 'REGIONAL'
+      Tags: 
+        - Key: project
+          Value: !Ref Project
+        - Key: environment
+          Value: !Ref Environment
+        - Key: billingTag
+          Value: !Ref BillingTag
+      VisibilityConfig: 
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "WhitelistManualIPWebACL${Environment}"
+        SampledRequestsEnabled: true
+
+Outputs:
+  WAFv2CloudFrontIPSetUpdaterFunction:
+    Description: "WAFv2 CloudFront IP Set Updater Lambda Function ARN"
+    Value: !GetAtt WAFv2CloudFrontIPSetUpdaterFunction.Arn

@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  UpdaterFunctionArn:
+    Type: String
+  Project:
+    Type: String
+    Default: WAFv2CloudFrontIPWhitelisting
+  Environment:
+    Type: String
+    Default: UAT
+  BillingTag:
+    Type: String
+    Default: WAFv2CloudFrontIPWhitelisting
+
+Globals:
+  Function:
+    Timeout: 10
+    Tags:
+      project: !Ref Project
+      environment: !Ref Environment
+      billingTag: !Ref BillingTag
+
+Resources:
+  WAFv2CloudFrontIPSetUpdaterInvoker:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.lambdaHandler
+      FunctionName: !Sub "UpdateWAFv2CloudFrontIPSetsInvoker-${Environment}"
+      Runtime: nodejs12.x
+      InlineCode: !Sub |
+        const updaterLambdaArn = '${UpdaterFunctionArn}'
+
+        // const AWSXRay = require('aws-xray-sdk-core')
+        // const AWS = AWSXRay.captureAWS(require('aws-sdk'))
+        const AWS = require('aws-sdk')
+
+        exports.lambdaHandler = async (event, context) => {
+          console.log(JSON.stringify(event))
+          const lambda = new AWS.Lambda({ region: updaterLambdaArn.split(":")[3] })
+          await lambda.invoke({
+            FunctionName: updaterLambdaArn,
+            InvocationType: 'Event',
+            Payload: JSON.stringify(event),
+          }).promise()
+        }
+      Policies:
+      - AWSLambdaExecute
+      - Version: '2012-10-17' 
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !Ref UpdaterFunctionArn
+      Events:
+        AmazonIpSpaceChanged:
+          Type: SNS
+          Properties:
+            Region: us-east-1
+            Topic: arn:aws:sns:us-east-1:806199016981:AmazonIpSpaceChanged
